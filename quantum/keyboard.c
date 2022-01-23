@@ -16,9 +16,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <stdint.h>
+#include "quantum.h"
 #include "keyboard.h"
 #include "matrix.h"
 #include "keymap.h"
+#include "magic.h"
 #include "host.h"
 #include "led.h"
 #include "keycode.h"
@@ -40,12 +42,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifdef PS2_MOUSE_ENABLE
 #    include "ps2_mouse.h"
 #endif
-#ifdef SERIAL_MOUSE_ENABLE
-#    include "serial_mouse.h"
-#endif
-#ifdef ADB_MOUSE_ENABLE
-#    include "adb.h"
-#endif
 #ifdef RGBLIGHT_ENABLE
 #    include "rgblight.h"
 #endif
@@ -61,12 +57,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifdef STENO_ENABLE
 #    include "process_steno.h"
 #endif
-#ifdef SERIAL_LINK_ENABLE
-#    include "serial_link/system/serial_link.h"
-#endif
-#ifdef VISUALIZER_ENABLE
-#    include "visualizer/visualizer.h"
-#endif
 #ifdef POINTING_DEVICE_ENABLE
 #    include "pointing_device.h"
 #endif
@@ -76,13 +66,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifdef JOYSTICK_ENABLE
 #    include "process_joystick.h"
 #endif
+#ifdef PROGRAMMABLE_BUTTON_ENABLE
+#    include "programmable_button.h"
+#endif
 #ifdef HD44780_ENABLE
 #    include "hd44780.h"
 #endif
-#ifdef QWIIC_ENABLE
-#    include "qwiic.h"
-#endif
-#ifdef OLED_DRIVER_ENABLE
+#ifdef OLED_ENABLE
 #    include "oled_driver.h"
 #endif
 #ifdef ST7565_ENABLE
@@ -97,9 +87,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifdef DIP_SWITCH_ENABLE
 #    include "dip_switch.h"
 #endif
-#ifdef STM32_EEPROM_ENABLE
-#    include "eeprom_stm32.h"
-#endif
 #ifdef EEPROM_DRIVER
 #    include "eeprom_driver.h"
 #endif
@@ -108,6 +95,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 #ifdef DIGITIZER_ENABLE
 #    include "digitizer.h"
+#endif
+#ifdef VIRTSER_ENABLE
+#    include "virtser.h"
+#endif
+#ifdef SLEEP_LED_ENABLE
+#    include "sleep_led.h"
+#endif
+#ifdef SPLIT_KEYBOARD
+#    include "split_util.h"
+#endif
+#ifdef BLUETOOTH_ENABLE
+#    include "outputselect.h"
 #endif
 
 static uint32_t last_input_modification_time = 0;
@@ -246,9 +245,6 @@ void keyboard_setup(void) {
     disable_jtag();
 #endif
     print_set_sendchar(sendchar);
-#ifdef STM32_EEPROM_ENABLE
-    EEPROM_Init();
-#endif
 #ifdef EEPROM_DRIVER
     eeprom_driver_init();
 #endif
@@ -302,6 +298,36 @@ void housekeeping_task(void) {
     housekeeping_task_user();
 }
 
+/** \brief Init tasks previously located in matrix_init_quantum
+ *
+ * TODO: rationalise against keyboard_init and current split role
+ */
+void quantum_init(void) {
+    magic();
+    led_init_ports();
+#ifdef BACKLIGHT_ENABLE
+    backlight_init_ports();
+#endif
+#ifdef AUDIO_ENABLE
+    audio_init();
+#endif
+#ifdef LED_MATRIX_ENABLE
+    led_matrix_init();
+#endif
+#ifdef RGB_MATRIX_ENABLE
+    rgb_matrix_init();
+#endif
+#if defined(UNICODE_COMMON_ENABLE)
+    unicode_input_mode_init();
+#endif
+#ifdef HAPTIC_ENABLE
+    haptic_init();
+#endif
+#if defined(BLUETOOTH_ENABLE) && defined(OUTPUT_AUTO_ENABLE)
+    set_output(OUTPUT_AUTO);
+#endif
+}
+
 /** \brief keyboard_init
  *
  * FIXME: needs doc
@@ -309,17 +335,18 @@ void housekeeping_task(void) {
 void keyboard_init(void) {
     timer_init();
     sync_timer_init();
-    matrix_init();
-#if defined(CRC_ENABLE)
-    crc_init();
-#endif
 #ifdef VIA_ENABLE
     via_init();
 #endif
-#ifdef QWIIC_ENABLE
-    qwiic_init();
+#ifdef SPLIT_KEYBOARD
+    split_pre_init();
 #endif
-#ifdef OLED_DRIVER_ENABLE
+    matrix_init();
+    quantum_init();
+#if defined(CRC_ENABLE)
+    crc_init();
+#endif
+#ifdef OLED_ENABLE
     oled_init(OLED_ROTATION_0);
 #endif
 #ifdef ST7565_ENABLE
@@ -327,12 +354,6 @@ void keyboard_init(void) {
 #endif
 #ifdef PS2_MOUSE_ENABLE
     ps2_mouse_init();
-#endif
-#ifdef SERIAL_MOUSE_ENABLE
-    serial_mouse_init();
-#endif
-#ifdef ADB_MOUSE_ENABLE
-    adb_mouse_init();
 #endif
 #ifdef BACKLIGHT_ENABLE
     backlight_init();
@@ -356,6 +377,15 @@ void keyboard_init(void) {
 #ifdef DIP_SWITCH_ENABLE
     dip_switch_init();
 #endif
+#ifdef SLEEP_LED_ENABLE
+    sleep_led_init();
+#endif
+#ifdef VIRTSER_ENABLE
+    virtser_init();
+#endif
+#ifdef SPLIT_KEYBOARD
+    split_post_init();
+#endif
 
 #if defined(DEBUG_MATRIX_SCAN_RATE) && defined(CONSOLE_ENABLE)
     debug_enable = true;
@@ -378,28 +408,16 @@ void switch_events(uint8_t row, uint8_t col, bool pressed) {
 #endif
 }
 
-/** \brief Keyboard task: Do keyboard routine jobs
+/** \brief Perform scan of keyboard matrix
  *
- * Do routine keyboard jobs:
- *
- * * scan matrix
- * * handle mouse movements
- * * run visualizer code
- * * handle midi commands
- * * light LEDs
- *
- * This is repeatedly called as fast as possible.
+ * Any detected changes in state are sent out as part of the processing
  */
-void keyboard_task(void) {
+bool matrix_scan_task(void) {
     static matrix_row_t matrix_prev[MATRIX_ROWS];
-    static uint8_t      led_status    = 0;
     matrix_row_t        matrix_row    = 0;
     matrix_row_t        matrix_change = 0;
 #ifdef QMK_KEYS_PER_SCAN
     uint8_t keys_processed = 0;
-#endif
-#ifdef ENCODER_ENABLE
-    bool encoders_changed = false;
 #endif
 
     uint8_t matrix_changed = matrix_scan();
@@ -447,9 +465,93 @@ void keyboard_task(void) {
 
 MATRIX_LOOP_END:
 
-#ifdef DEBUG_MATRIX_SCAN_RATE
     matrix_scan_perf_task();
+    return matrix_changed;
+}
+
+/** \brief Tasks previously located in matrix_scan_quantum
+ *
+ * TODO: rationalise against keyboard_task and current split role
+ */
+void quantum_task(void) {
+#ifdef SPLIT_KEYBOARD
+    // some tasks should only run on master
+    if (!is_keyboard_master()) return;
 #endif
+
+#if defined(AUDIO_ENABLE) && defined(AUDIO_INIT_DELAY)
+    // There are some tasks that need to be run a little bit
+    // after keyboard startup, or else they will not work correctly
+    // because of interaction with the USB device state, which
+    // may still be in flux...
+    //
+    // At the moment the only feature that needs this is the
+    // startup song.
+    static bool     delayed_tasks_run  = false;
+    static uint16_t delayed_task_timer = 0;
+    if (!delayed_tasks_run) {
+        if (!delayed_task_timer) {
+            delayed_task_timer = timer_read();
+        } else if (timer_elapsed(delayed_task_timer) > 300) {
+            audio_startup();
+            delayed_tasks_run = true;
+        }
+    }
+#endif
+
+#if defined(AUDIO_ENABLE) && !defined(NO_MUSIC_MODE)
+    music_task();
+#endif
+
+#ifdef KEY_OVERRIDE_ENABLE
+    key_override_task();
+#endif
+
+#ifdef SEQUENCER_ENABLE
+    sequencer_task();
+#endif
+
+#ifdef TAP_DANCE_ENABLE
+    tap_dance_task();
+#endif
+
+#ifdef COMBO_ENABLE
+    combo_task();
+#endif
+
+#ifdef WPM_ENABLE
+    decay_wpm();
+#endif
+
+#ifdef HAPTIC_ENABLE
+    haptic_task();
+#endif
+
+#ifdef DIP_SWITCH_ENABLE
+    dip_switch_read(false);
+#endif
+
+#ifdef AUTO_SHIFT_ENABLE
+    autoshift_matrix_scan();
+#endif
+}
+
+/** \brief Keyboard task: Do keyboard routine jobs
+ *
+ * Do routine keyboard jobs:
+ *
+ * * scan matrix
+ * * handle mouse movements
+ * * handle midi commands
+ * * light LEDs
+ *
+ * This is repeatedly called as fast as possible.
+ */
+void keyboard_task(void) {
+    bool matrix_changed = matrix_scan_task();
+    (void)matrix_changed;
+
+    quantum_task();
 
 #if defined(RGBLIGHT_ENABLE)
     rgblight_task();
@@ -469,17 +571,13 @@ MATRIX_LOOP_END:
 #endif
 
 #ifdef ENCODER_ENABLE
-    encoders_changed = encoder_read();
+    bool encoders_changed = encoder_read();
     if (encoders_changed) last_encoder_activity_trigger();
 #endif
 
-#ifdef QWIIC_ENABLE
-    qwiic_task();
-#endif
-
-#ifdef OLED_DRIVER_ENABLE
+#ifdef OLED_ENABLE
     oled_task();
-#    ifndef OLED_DISABLE_TIMEOUT
+#    if OLED_TIMEOUT > 0
     // Wake up oled if user is using those fabulous keys or spinning those encoders!
 #        ifdef ENCODER_ENABLE
     if (matrix_changed || encoders_changed) oled_on();
@@ -491,7 +589,7 @@ MATRIX_LOOP_END:
 
 #ifdef ST7565_ENABLE
     st7565_task();
-#    ifndef ST7565_DISABLE_TIMEOUT
+#    if ST7565_TIMEOUT > 0
     // Wake up display if user is using those fabulous keys or spinning those encoders!
 #        ifdef ENCODER_ENABLE
     if (matrix_changed || encoders_changed) st7565_on();
@@ -508,22 +606,6 @@ MATRIX_LOOP_END:
 
 #ifdef PS2_MOUSE_ENABLE
     ps2_mouse_task();
-#endif
-
-#ifdef SERIAL_MOUSE_ENABLE
-    serial_mouse_task();
-#endif
-
-#ifdef ADB_MOUSE_ENABLE
-    adb_mouse_task();
-#endif
-
-#ifdef SERIAL_LINK_ENABLE
-    serial_link_update();
-#endif
-
-#ifdef VISUALIZER_ENABLE
-    visualizer_update(default_layer_state, layer_state, visualizer_get_mods(), host_keyboard_leds());
 #endif
 
 #ifdef POINTING_DEVICE_ENABLE
@@ -548,22 +630,9 @@ MATRIX_LOOP_END:
     digitizer_task();
 #endif
 
-    // update LED
-    if (led_status != host_keyboard_leds()) {
-        led_status = host_keyboard_leds();
-        keyboard_set_leds(led_status);
-    }
-}
+#ifdef PROGRAMMABLE_BUTTON_ENABLE
+    programmable_button_send();
+#endif
 
-/** \brief keyboard set leds
- *
- * FIXME: needs doc
- */
-void keyboard_set_leds(uint8_t leds) {
-    if (debug_keyboard) {
-        debug("keyboard_set_led: ");
-        debug_hex8(leds);
-        debug("\n");
-    }
-    led_set(leds);
+    led_task();
 }
